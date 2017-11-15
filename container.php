@@ -12,6 +12,9 @@ use Bernard\QueueFactory\PersistentFactory;
 use Building\Domain\Aggregate\Building;
 use Building\Domain\Command;
 use Building\Domain\DomainEvent\CheckInAnomalyDetected;
+use Building\Domain\DomainEvent\NewBuildingWasRegistered;
+use Building\Domain\DomainEvent\UserCheckedIn;
+use Building\Domain\DomainEvent\UserCheckedOut;
 use Building\Domain\Policy\NotifySecurityWhenCheckInAnomalyIsDetected;
 use Building\Domain\Repository\BuildingRepositoryInterface;
 use Building\Infrastructure\Repository\BuildingRepository;
@@ -33,6 +36,7 @@ use Prooph\EventStore\Adapter\PayloadSerializer\JsonPayloadSerializer;
 use Prooph\EventStore\Aggregate\AggregateRepository;
 use Prooph\EventStore\Aggregate\AggregateType;
 use Prooph\EventStore\EventStore;
+use Prooph\EventStore\Stream\StreamName;
 use Prooph\EventStoreBusBridge\EventPublisher;
 use Prooph\EventStoreBusBridge\TransactionManager;
 use Prooph\ServiceBus\Async\MessageProducer;
@@ -235,6 +239,21 @@ return new ServiceManager([
                 new NotifySecurityWhenCheckInAnomalyIsDetected([$commandBus, 'dispatch']),
             ];
         },
+        NewBuildingWasRegistered::class . '-projectors' => function (ContainerInterface $container) : array {
+            return [
+                $container->get('recompute-users-json'),
+            ];
+        },
+        UserCheckedIn::class . '-projectors' => function (ContainerInterface $container) : array {
+            return [
+                $container->get('recompute-users-json'),
+            ];
+        },
+        UserCheckedOut::class . '-projectors' => function (ContainerInterface $container) : array {
+            return [
+                $container->get('recompute-users-json'),
+            ];
+        },
         BuildingRepositoryInterface::class => function (ContainerInterface $container) : BuildingRepositoryInterface {
             return new BuildingRepository(
                 new AggregateRepository(
@@ -243,6 +262,35 @@ return new ServiceManager([
                     new AggregateTranslator()
                 )
             );
+        },
+        'recompute-users-json' => function (ContainerInterface $container) {
+            $eventStore = $container->get(EventStore::class);
+
+            return function () use ($eventStore) {
+                /* null[][] indexed by building id and username */
+                $users = [];
+
+                foreach ($eventStore->load(new StreamName('event'))->streamEvents() as $pastEvent) {
+                    if ($pastEvent instanceof NewBuildingWasRegistered) {
+                        $users[$pastEvent->aggregateId()] = [];
+                    }
+
+                    if ($pastEvent instanceof UserCheckedIn) {
+                        $users[$pastEvent->buildingId()->toString()][$pastEvent->username()] = null;
+                    }
+
+                    if ($pastEvent instanceof UserCheckedOut) {
+                        unset($users[$pastEvent->buildingId()->toString()][$pastEvent->username()]);
+                    }
+                }
+
+                \array_walk($users, function (array $users, string $buildingId) {
+                    \file_put_contents(
+                        __DIR__ . '/public/building-' . $buildingId . '.json',
+                        \json_encode(\array_keys($users))
+                    );
+                });
+            };
         },
     ],
 ]);
